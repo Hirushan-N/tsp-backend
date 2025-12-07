@@ -1,5 +1,4 @@
 import json
-import os
 import random
 import sqlite3
 import time
@@ -15,7 +14,6 @@ app = Flask(__name__)
 CORS(app)
 
 
-# ---------- DB helpers ----------
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -27,7 +25,6 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
-    # players table
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS players (
@@ -37,7 +34,6 @@ def init_db():
         """
     )
 
-    # game sessions (per /api/new-game)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS sessions (
@@ -49,7 +45,6 @@ def init_db():
         """
     )
 
-    # finished games where user was correct
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS games (
@@ -66,7 +61,6 @@ def init_db():
         """
     )
 
-    # algorithm timing per round
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS algorithm_runs (
@@ -87,8 +81,6 @@ def init_db():
 
 init_db()
 
-
-# ---------- TSP helpers ----------
 
 def generate_random_matrix(n: int = 10, low: int = 50, high: int = 100) -> List[List[int]]:
     """
@@ -155,12 +147,16 @@ def tsp_nearest_neighbor(home: int, selected: List[int], matrix: List[List[int]]
     return {"route": route, "distance": int(d)}
 
 
-def tsp_random_search(home: int, selected: List[int], matrix: List[List[int]], iterations: int = 2000) -> Dict[str, Any]:
+def tsp_random_search(
+    home: int,
+    selected: List[int],
+    matrix: List[List[int]],
+    iterations: int = 2000,
+) -> Dict[str, Any]:
     """
     Randomized search over random permutations.
     Time complexity: O(iterations * k)
     """
-    import math
     from itertools import permutations
 
     k = len(selected)
@@ -185,10 +181,71 @@ def tsp_random_search(home: int, selected: List[int], matrix: List[List[int]], i
     return {"route": best_route, "distance": int(best_distance)}
 
 
+def tsp_mst_prim(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Any]:
+    """
+    MST-based TSP heuristic using Prim's algorithm (from the course's
+    'Minimum Connector / Prim's Algorithm' content).
+
+    Steps:
+      1. Build a Minimum Spanning Tree (MST) over the subgraph containing
+         the home city and all selected cities using Prim's algorithm.
+      2. Perform a DFS/preorder traversal of the MST starting from home.
+      3. Use the DFS order as the visiting order; return to home at the end.
+
+    Time complexity:
+      - Prim's algorithm here: O(k^2) for k = |selected| + 1
+      - DFS traversal: O(k)
+      => Overall: O(k^2)
+    """
+    subset = set(selected)
+    subset.add(home)
+
+    visited = {home}
+    edges_mst = [] 
+
+    while visited != subset:
+        best_edge = None
+        best_weight = float("inf")
+
+        for u in visited:
+            for v in subset - visited:
+                w = matrix[u][v]
+                if w < best_weight:
+                    best_weight = w
+                    best_edge = (u, v)
+
+        if best_edge is None:
+            break
+
+        u, v = best_edge
+        edges_mst.append((u, v))
+        visited.add(v)
+
+    adj: Dict[int, List[int]] = {}
+    for u, v in edges_mst:
+        adj.setdefault(u, []).append(v)
+        adj.setdefault(v, []).append(u)
+
+    route_order: List[int] = []
+
+    def dfs(node: int, parent: int = -1):
+        route_order.append(node)
+        for nxt in adj.get(node, []):
+            if nxt != parent:
+                dfs(nxt, node)
+
+    dfs(home)
+
+    route = route_order + [home]
+    d = route_distance(matrix, route)
+    return {"route": route, "distance": int(d)}
+
+
 def run_algorithms(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Dict[str, Any]]:
     algorithms = {
-        "bruteforce": tsp_bruteforce,
-        "nearest_neighbor": tsp_nearest_neighbor,
+        "bruteforce": tsp_bruteforce, 
+        "nearest_neighbor": tsp_nearest_neighbor, 
+        "mst_prim": tsp_mst_prim, 
         "random_search": tsp_random_search,
     }
 
@@ -279,7 +336,7 @@ def check_answer():
             conn.close()
             return jsonify({"error": "routeBetween must not include home city"}), 400
 
-        if len(selected_indices) > 8:
+        if len(selected_indices) > 9:
             conn.close()
             return jsonify({"error": "Please choose at most 8 cities to keep the game fast."}), 400
 
@@ -356,8 +413,9 @@ def complexity():
     """
     return jsonify(
         {
-            "bruteforce": "O(k!) where k is the number of selected cities.",
-            "nearest_neighbor": "O(k^2) – for each step, we scan the remaining cities.",
+            "bruteforce": "O(k!) where k is the number of selected cities (exact search over all permutations).",
+            "nearest_neighbor": "O(k^2) - greedy algorithm: for each step, scan the remaining cities to find the nearest one.",
+            "mst_prim": "O(k^2) - build a Minimum Spanning Tree with Prim's algorithm, then do a DFS traversal.",
             "random_search": "O(I * k) where I is the number of random permutations sampled.",
         }
     )

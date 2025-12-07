@@ -1,264 +1,21 @@
+# app.py
 import json
-import random
-import sqlite3
-import time
-from typing import List, Dict, Any
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-DB_NAME = "tsp_game.db"
-CITIES = [chr(ord("A") + i) for i in range(10)]
+from config import CITIES
+from db import get_db, init_db
+from algorithms import (
+    generate_random_matrix,
+    route_distance,
+    run_algorithms,
+)
 
 app = Flask(__name__)
 CORS(app)
 
-
-
-def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS players (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
-        );
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            home_city TEXT NOT NULL,
-            distance_matrix TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS games (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            player_id INTEGER NOT NULL,
-            session_id INTEGER NOT NULL,
-            home_city TEXT NOT NULL,
-            selected_cities TEXT NOT NULL,
-            shortest_route TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(player_id) REFERENCES players(id),
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
-        );
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS algorithm_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL,
-            algorithm_name TEXT NOT NULL,
-            duration_ms REAL NOT NULL,
-            distance INTEGER NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(session_id) REFERENCES sessions(id)
-        );
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-
 init_db()
-
-
-def generate_random_matrix(n: int = 10, low: int = 50, high: int = 100) -> List[List[int]]:
-    """
-    Generate a symmetric distance matrix with 0 on the diagonal.
-    """
-    matrix: List[List[int]] = []
-    for i in range(n):
-        row = []
-        for j in range(n):
-            if i == j:
-                row.append(0)
-            elif j < i:
-                row.append(matrix[j][i])
-            else:
-                row.append(random.randint(low, high))
-        matrix.append(row)
-    return matrix
-
-
-def route_distance(matrix: List[List[int]], route: List[int]) -> int:
-    dist = 0
-    for i in range(len(route) - 1):
-        dist += matrix[route[i]][route[i + 1]]
-    return dist
-
-
-def tsp_bruteforce(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Any]:
-    """
-    Exact algorithm: tries all permutations of selected cities.
-    Time complexity: O(k!) where k = number of selected cities.
-    """
-    from itertools import permutations
-
-    best_route = None
-    best_distance = float("inf")
-
-    for perm in permutations(selected):
-        route = [home] + list(perm) + [home]
-        d = route_distance(matrix, route)
-        if d < best_distance:
-            best_distance = d
-            best_route = route
-
-    return {"route": best_route, "distance": int(best_distance)}
-
-
-def tsp_nearest_neighbor(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Any]:
-    """
-    Greedy nearest neighbor algorithm.
-    Time complexity: O(k^2)
-    """
-    unvisited = set(selected)
-    route = [home]
-    current = home
-
-    while unvisited:
-        next_city = min(unvisited, key=lambda c: matrix[current][c])
-        unvisited.remove(next_city)
-        route.append(next_city)
-        current = next_city
-
-    route.append(home)
-    d = route_distance(matrix, route)
-    return {"route": route, "distance": int(d)}
-
-
-def tsp_random_search(
-    home: int,
-    selected: List[int],
-    matrix: List[List[int]],
-    iterations: int = 2000,
-) -> Dict[str, Any]:
-    """
-    Randomized search over random permutations.
-    Time complexity: O(iterations * k)
-    """
-    from itertools import permutations
-
-    k = len(selected)
-
-    if k <= 7:
-        iters = list(permutations(selected))
-    else:
-        iters = []
-        for _ in range(iterations):
-            perm = random.sample(selected, k)
-            iters.append(perm)
-
-    best_route = None
-    best_distance = float("inf")
-    for perm in iters:
-        route = [home] + list(perm) + [home]
-        d = route_distance(matrix, route)
-        if d < best_distance:
-            best_distance = d
-            best_route = route
-
-    return {"route": best_route, "distance": int(best_distance)}
-
-
-def tsp_mst_prim(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Any]:
-    """
-    MST-based TSP heuristic using Prim's algorithm (from the course's
-    'Minimum Connector / Prim's Algorithm' content).
-
-    Steps:
-      1. Build a Minimum Spanning Tree (MST) over the subgraph containing
-         the home city and all selected cities using Prim's algorithm.
-      2. Perform a DFS/preorder traversal of the MST starting from home.
-      3. Use the DFS order as the visiting order; return to home at the end.
-
-    Time complexity:
-      - Prim's algorithm here: O(k^2) for k = |selected| + 1
-      - DFS traversal: O(k)
-      => Overall: O(k^2)
-    """
-    subset = set(selected)
-    subset.add(home)
-
-    visited = {home}
-    edges_mst = [] 
-
-    while visited != subset:
-        best_edge = None
-        best_weight = float("inf")
-
-        for u in visited:
-            for v in subset - visited:
-                w = matrix[u][v]
-                if w < best_weight:
-                    best_weight = w
-                    best_edge = (u, v)
-
-        if best_edge is None:
-            break
-
-        u, v = best_edge
-        edges_mst.append((u, v))
-        visited.add(v)
-
-    adj: Dict[int, List[int]] = {}
-    for u, v in edges_mst:
-        adj.setdefault(u, []).append(v)
-        adj.setdefault(v, []).append(u)
-
-    route_order: List[int] = []
-
-    def dfs(node: int, parent: int = -1):
-        route_order.append(node)
-        for nxt in adj.get(node, []):
-            if nxt != parent:
-                dfs(nxt, node)
-
-    dfs(home)
-
-    route = route_order + [home]
-    d = route_distance(matrix, route)
-    return {"route": route, "distance": int(d)}
-
-
-def run_algorithms(home: int, selected: List[int], matrix: List[List[int]]) -> Dict[str, Dict[str, Any]]:
-    algorithms = {
-        "bruteforce": tsp_bruteforce, 
-        "nearest_neighbor": tsp_nearest_neighbor, 
-        "mst_prim": tsp_mst_prim, 
-        "random_search": tsp_random_search,
-    }
-
-    results: Dict[str, Dict[str, Any]] = {}
-
-    for name, fn in algorithms.items():
-        start = time.perf_counter()
-        result = fn(home, selected, matrix)
-        duration_ms = (time.perf_counter() - start) * 1000.0
-        result["durationMs"] = duration_ms
-        results[name] = result
-
-    return results
 
 
 # ---------- API endpoints ----------
@@ -408,9 +165,6 @@ def check_answer():
 
 @app.route("/api/complexity", methods=["GET"])
 def complexity():
-    """
-    Simple endpoint returning textual complexity analysis.
-    """
     return jsonify(
         {
             "bruteforce": "O(k!) where k is the number of selected cities (exact search over all permutations).",
@@ -422,4 +176,6 @@ def complexity():
 
 
 if __name__ == "__main__":
+    import random 
+
     app.run(debug=True)

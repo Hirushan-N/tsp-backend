@@ -89,9 +89,8 @@ def tsp_mst_prim(home: int, selected: List[int], matrix: List[List[int]]) -> Dic
     subset = set(selected)
     subset.add(home)
 
-    # --- 1. Build MST with Prim's algorithm ---
     visited = {home}
-    edges_mst = []  # list of (u, v) edges in MST
+    edges_mst = [] 
 
     while visited != subset:
         best_edge = None
